@@ -12,6 +12,16 @@
   <link rel="preconnect" href="https://fonts.googleapis.com">
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
   <link href="https://fonts.googleapis.com/css2?family=Unbounded:wght@400;600;800;900&family=Manrope:wght@400;500;600;700&family=JetBrains+Mono:wght@400;600&display=swap" rel="stylesheet">
+  <link rel="preconnect" href="https://unpkg.com" crossorigin>
+  <link rel="modulepreload" href="https://unpkg.com/three@0.169.0/build/three.module.js">
+  <link rel="modulepreload" href="https://unpkg.com/three@0.169.0/examples/jsm/controls/OrbitControls.js">
+  <link rel="modulepreload" href="https://unpkg.com/three@0.169.0/examples/jsm/postprocessing/EffectComposer.js">
+  <link rel="modulepreload" href="https://unpkg.com/three@0.169.0/examples/jsm/postprocessing/RenderPass.js">
+  <link rel="modulepreload" href="https://unpkg.com/three@0.169.0/examples/jsm/postprocessing/UnrealBloomPass.js">
+  <link rel="modulepreload" href="https://unpkg.com/three@0.169.0/examples/jsm/postprocessing/OutputPass.js">
+  <link rel="modulepreload" href="https://unpkg.com/three@0.169.0/examples/jsm/lines/Line2.js">
+  <link rel="modulepreload" href="https://unpkg.com/three@0.169.0/examples/jsm/lines/LineMaterial.js">
+  <link rel="modulepreload" href="https://unpkg.com/three@0.169.0/examples/jsm/lines/LineGeometry.js">
   <link rel="stylesheet" href="assets/css/style.css">
   <script type="importmap">
   {
@@ -46,11 +56,11 @@
       <span class="nav__title">F1&nbsp;MAPS</span>
       <span class="nav__live"><i></i>3D</span>
     </a>
-    <nav class="nav__links">
-      <a href="#viewer" data-i18n="nav.viewer">Трасса</a>
-      <a href="#circuits" data-i18n="nav.circuits">Все трассы</a>
-    </nav>
     <div class="nav__right">
+      <button class="cinebtn" id="cineBtn" type="button" title="C">
+        <svg viewBox="0 0 24 24" aria-hidden="true"><rect x="2.5" y="5" width="19" height="14" rx="2.5"/><path d="M10 9.2v5.6l4.6-2.8z"/></svg>
+        <span data-i18n="cine.btn">Кино</span>
+      </button>
       <div class="lang" role="group" aria-label="Language">
         <button data-lang="ru" type="button">RU</button>
         <button data-lang="en" type="button">EN</button>
@@ -160,24 +170,19 @@
           </div>
         </div>
       </div>
-    </section>
 
-    <!-- ============ MARQUEE ============ -->
-    <div class="marquee" aria-hidden="true"><div class="marquee__track" id="marquee"></div></div>
-
-    <!-- ============ ALL CIRCUITS ============ -->
-    <section class="section" id="circuits">
-      <div class="wrap">
-        <div class="sector mono"><span>S2</span><i></i><b data-i18n="grid.sector">Трассы чемпионата</b></div>
-        <div class="section__head">
-          <h2 class="h2" data-i18n-html="grid.title">Каждый поворот —<br><em>в 3D.</em></h2>
-          <div class="tabs tabs--big" role="tablist">
-            <button type="button" class="tab is-active" data-filter="season" data-i18n="tab.season">Сезон 2026</button>
-            <button type="button" class="tab" data-filter="all" data-i18n="tab.all">Все</button>
-          </div>
+      <!-- ============ CINEMA MODE LAYERS ============ -->
+      <div class="cine" id="cine" aria-hidden="true">
+        <div class="cine__bar cine__bar--top"></div>
+        <div class="cine__bar cine__bar--bottom"></div>
+        <div class="cine__fade" id="cineFade"></div>
+        <div class="cine__card" id="cineCard">
+          <p class="cine__kicker mono" id="cineKicker">R01 · —</p>
+          <p class="cine__title" id="cineTitle">—</p>
+          <p class="cine__meta mono" id="cineMeta">—</p>
+          <span class="cine__stripes"><i></i><i></i><i></i></span>
         </div>
-        <div class="grid" id="grid"></div>
-        <p class="note mono" data-i18n-html="grid.note">Геометрия — <a href="https://github.com/bacinger/f1-circuits" target="_blank" rel="noopener">bacinger/f1-circuits</a> (MIT). Высоты — <a href="https://open-meteo.com/en/docs/elevation-api" target="_blank" rel="noopener">Open-Meteo</a> / Copernicus DEM и <a href="https://www.opentopodata.org" target="_blank" rel="noopener">OpenTopoData</a> / SRTM, 90 м. Скорость, передачи и время круга — упрощённая физическая симуляция, не реальная телеметрия.</p>
+        <button class="cine__exit mono" id="cineExit" type="button"><span data-i18n="cine.exit">Выйти</span> <b>Esc</b></button>
       </div>
     </section>
   </main>
@@ -188,6 +193,7 @@
       <span class="credit__name">Abrorov Shahriyor</span>
       <span class="credit__stripes" aria-hidden="true"><i></i><i></i><i></i></span>
     </a>
+    <span class="footer__src" data-i18n-html="footer.src">Данные: <a href="https://github.com/bacinger/f1-circuits" target="_blank" rel="noopener">f1-circuits</a> (MIT) · высоты <a href="https://open-meteo.com/en/docs/elevation-api" target="_blank" rel="noopener">Open-Meteo</a>, <a href="https://www.opentopodata.org" target="_blank" rel="noopener">OpenTopoData</a> · скорость и время — симуляция</span>
     <span>© <span id="year">2026</span> SHA · F1 MAPS</span>
   </footer>
   <script>document.getElementById('year').textContent = new Date().getFullYear();</script>

@@ -11,7 +11,8 @@ import { Line2 } from "three/addons/lines/Line2.js";
 import { LineMaterial } from "three/addons/lines/LineMaterial.js";
 import { LineGeometry } from "three/addons/lines/LineGeometry.js";
 
-window.__f1 = true;
+// tiny diagnostics hook: __f1.frames() = rendered frames, __f1.quality() = adaptive level (0..3)
+window.__f1 = { frames: () => renderCount, quality: () => qLevel };
 const NOFX = new URLSearchParams(location.search).has("nofx");
 
 const $ = (s, r = document) => r.querySelector(s);
@@ -206,43 +207,11 @@ function renderList() {
   $("#tCount").textContent = TRACKS.filter(T => state.filter === "all" || T.season >= 0).length;
 }
 
-function renderGrid() {
-  const grid = $("#grid");
-  grid.innerHTML = "";
-  for (const T of TRACKS.filter(T => state.filter === "all" || T.season >= 0)) {
-    const o = outline(T), P = prep(T);
-    const card = document.createElement("button");
-    card.type = "button";
-    card.className = "card";
-    card.dataset.id = T.id;
-    const sw = Math.max(o.w, o.h) / 60;
-    card.innerHTML = `
-      <span class="card__top mono"><span class="chip${T.season < 0 ? " is-archive" : ""}">${T.season >= 0 ? roundLabel(T) : t("card.archive")}</span><span></span></span>
-      <span class="card__map"><svg viewBox="${o.vb}" preserveAspectRatio="xMidYMid meet" aria-hidden="true">
-        <path class="p-glow" d="${o.d}"/><path class="p-main" d="${o.d}"/><circle cx="${o.x0.toFixed(0)}" cy="${o.z0.toFixed(0)}" r="${sw.toFixed(0)}"/></svg></span>
-      <span><span class="card__name"></span><span class="card__place" style="display:block"></span></span>
-      <span class="card__stats"><span><b>${(T.length / 1000).toFixed(3)}</b> ${t("unit.km")}</span><span>Δ <b>${Math.round(P.ymax)}</b> ${t("unit.m")}</span><span>GP <b>${T.firstgp}</b></span></span>`;
-    $(".card__top > span:last-child", card).textContent = country(T.cc);
-    $(".card__name", card).textContent = T.name;
-    $(".card__place", card).textContent = T.city;
-    grid.appendChild(card);
-  }
-}
-
-function renderMarquee() {
-  const names = TRACKS.filter(T => T.season >= 0).map(T => T.city);
-  const html = names.map(n => `<span></span><b>✦</b>`).join("");
-  const m = $("#marquee");
-  m.innerHTML = html + html;
-  $$("span", m).forEach((el, i) => { el.textContent = names[i % names.length]; });
-}
-
 function setFilter(f) {
   state.filter = f;
   store.set("filter", f);
   $$("[data-filter]").forEach(b => b.classList.toggle("is-active", b.dataset.filter === f));
   renderList();
-  renderGrid();
 }
 
 function updateInfo(T, P) {
@@ -285,11 +254,70 @@ const desiredPos = new THREE.Vector3(), desiredLook = new THREE.Vector3(), lookA
 let tween = null;
 const followDir = new THREE.Vector3(0, 0, 1), followFrom = new THREE.Vector3(), followLookFrom = new THREE.Vector3();
 let followBlend = 1;
+let dirty = true;
+let renderCount = 0;
 let idleTimer = 0;
+
+/* ---------- adaptive quality ----------
+   Bloom + MSAA in a float buffer roughly halves the frame rate on integrated GPUs.
+   Start high (the start-lights loader hides the first seconds), measure, and step
+   down until frames fit the budget. The settled level is remembered per browser. */
+const QUALITY = [
+  { dpr: 0.75, samples: 0, bloom: false, bs: 0 },    // 0: no post-processing
+  { dpr: 1,    samples: 0, bloom: true,  bs: 0.5 },  // 1: quarter-res bloom
+  { dpr: 1.5,  samples: 2, bloom: true,  bs: 0.75 },
+  { dpr: 2,    samples: 4, bloom: true,  bs: 1 },    // 3: full quality
+];
+const qForced = new URLSearchParams(location.search).get("q");
+const coarse = matchMedia("(pointer: coarse)").matches;
+let qLevel = (() => {
+  if (NOFX) return 0;
+  if (qForced !== null && QUALITY[+qForced]) return +qForced;
+  const saved = +store.get("quality", NaN);
+  const def = coarse || (navigator.hardwareConcurrency || 8) <= 4 ? 1 : 3;
+  // retry one level above the remembered one, in case the last visit was a bad moment
+  return Number.isFinite(saved) ? Math.min(QUALITY.length - 1, saved + 1) : def;
+})();
+const qLocked = NOFX || qForced !== null;
+const perf = { samples: [], last: 0, since: 0, frames: 0 };
+
+function applyQuality() {
+  const Q = QUALITY[qLevel];
+  const pr = Math.min(devicePixelRatio || 1, Q.dpr);
+  renderer.setPixelRatio(pr);
+  composer.setPixelRatio(pr);
+  for (const rtq of [composer.renderTarget1, composer.renderTarget2]) {
+    if (rtq.samples !== Q.samples) { rtq.samples = Q.samples; rtq.dispose(); }
+  }
+  bloom.enabled = Q.bloom;
+  document.body.classList.toggle("q-low", qLevel <= 1);
+  resize();
+}
+
+function measure(now) {
+  if (qLocked || document.hidden) { perf.last = now; return; }
+  const ms = perf.last ? now - perf.last : 16;
+  perf.last = now;
+  if (ms > 250) return; // tab switch, breakpoint, etc.
+  perf.samples.push(ms);
+  perf.frames++;
+  // decide quickly during the loader, then calmly
+  const win = perf.frames < 200 ? 30 : 120;
+  if (perf.samples.length < win) return;
+  const sorted = perf.samples.slice().sort((a, b) => a - b);
+  const median = sorted[sorted.length >> 1];
+  perf.samples.length = 0;
+  if (median > 21 && qLevel > 0) {
+    qLevel--;
+    applyQuality();
+    perf.last = 0;
+  } else {
+    store.set("quality", qLevel);
+  }
+}
 
 function initThree() {
   renderer = new THREE.WebGLRenderer({ canvas, antialias: true, powerPreference: "high-performance" });
-  renderer.setPixelRatio(Math.min(devicePixelRatio, 2));
   renderer.toneMapping = THREE.NoToneMapping;
   scene = new THREE.Scene();
   scene.background = COL.bg.clone();
@@ -303,10 +331,11 @@ function initThree() {
   controls.minDistance = 25;
   controls.autoRotate = !reduceMotion;
   controls.autoRotateSpeed = 0.35;
+  controls.addEventListener("change", () => { dirty = true; });
   controls.addEventListener("start", () => { controls.autoRotate = false; clearTimeout(idleTimer); });
   controls.addEventListener("end", () => {
     clearTimeout(idleTimer);
-    if (!reduceMotion) idleTimer = setTimeout(() => { if (state.cam === "orbit") controls.autoRotate = true; }, 9000);
+    if (!reduceMotion) idleTimer = setTimeout(() => { if (state.cam === "orbit" && state.playing) controls.autoRotate = true; }, 9000);
   });
 
   scene.add(new THREE.HemisphereLight(0xc8d4ff, 0x0b0b12, 1.6));
@@ -314,7 +343,7 @@ function initThree() {
   sun.position.set(300, 600, 200);
   scene.add(sun);
 
-  const rt = new THREE.WebGLRenderTarget(1, 1, { type: THREE.HalfFloatType, samples: 4 });
+  const rt = new THREE.WebGLRenderTarget(1, 1, { type: THREE.HalfFloatType, samples: QUALITY[qLevel].samples });
   composer = new EffectComposer(renderer, rt);
   composer.addPass(new RenderPass(scene, camera));
   bloom = new UnrealBloomPass(new THREE.Vector2(1, 1), 0.6, 0.5, 0.18);
@@ -322,6 +351,7 @@ function initThree() {
   composer.addPass(new OutputPass());
 
   buildCar();
+  applyQuality();
   addEventListener("resize", resize);
   new ResizeObserver(resize).observe(viewer);
 }
@@ -616,6 +646,8 @@ function buildTrack() {
   if (P.ymax > 8) addTag(new THREE.Vector3(pts[P.hi].x, pts[P.hi].y + 4, pts[P.hi].z), `▲ ${cur.T.base + Math.round(P.ymax)} ${t("unit.m")}`, "tag--hi");
 
   scene.add(g);
+  resetTrail(n);
+  dirty = true;
   scene.fog = new THREE.FogExp2(0x050506, 0.28 / r);
   controls.maxDistance = r * 20;
   drawProfileBase();
@@ -649,6 +681,12 @@ let freeRect = { x: 0, y: 0, w: 1, h: 1 };
 function computeViewOffset() {
   const vr = viewer.getBoundingClientRect();
   const W = vr.width, H = vr.height;
+  if (cine.on) {
+    const bar = Math.min(H * 0.11, W * 0.14);
+    freeRect = { x: 0, y: bar, w: W, h: H - 2 * bar };
+    camera.setViewOffset(W, H, 0, 0, W, H);
+    return;
+  }
   const info = $("#info").getBoundingClientRect(), hud = $("#hud").getBoundingClientRect(), panel = $("#panel").getBoundingClientRect();
   const stacked = innerWidth <= 980;
   let L = 0, R = W, T = 72, B = hud.top - vr.top;
@@ -688,7 +726,7 @@ function setCam(mode) {
   $$("#camSeg button").forEach(b => b.classList.toggle("is-active", b.dataset.cam === mode));
   controls.enabled = mode === "orbit" || mode === "top";
   controls.enableRotate = mode === "orbit";
-  controls.autoRotate = mode === "orbit" && !reduceMotion;
+  controls.autoRotate = mode === "orbit" && !reduceMotion && state.playing;
   camera.fov = mode === "onboard" ? 68 : mode === "chase" ? 55 : 40;
   camera.updateProjectionMatrix();
   if (mode === "orbit" || mode === "top") flyTo(framing(mode), 1400);
@@ -707,6 +745,7 @@ const pctx = prof.getContext("2d");
 let profBase = null;
 function drawProfileBase() {
   if (!cur) return;
+  lastProfX = -1;
   const dpr = Math.min(devicePixelRatio, 2);
   const w = prof.clientWidth, h = prof.clientHeight;
   if (!w || !h) return;
@@ -760,6 +799,7 @@ function seekFromProfile(e) {
   while (i < P.n - 1 && P.s[i + 1] < target) i++;
   const f = (target - P.s[i]) / P.ds[i];
   state.clock = P.tc[i] + (P.tc[i + 1] - P.tc[i]) * f;
+  dirty = true;
 }
 prof.addEventListener("pointerdown", e => {
   seekFromProfile(e);
@@ -809,10 +849,222 @@ function step(dir) {
   if (row) row.scrollIntoView({ block: "nearest", behavior: reduceMotion ? "auto" : "smooth" });
 }
 
+/* ==========================================================
+   CINEMA MODE — no UI, an auto-director cuts between shots,
+   one lap per circuit, then on to the next one
+   ========================================================== */
+const cine = {
+  on: false, shot: null, t: 0, dur: 0, a: 0, side: 1, snap: true, fading: false,
+  pendingNext: false, laps: 0, fs: false, recent: [], uiTimer: 0, cardTimer: 0,
+  anchor: new THREE.Vector3(), cam: new THREE.Vector3(), look: new THREE.Vector3(),
+};
+const UP = new THREE.Vector3(0, 1, 0);
+const SHOTS = {
+  //            fov  duration
+  wide:      { fov: 36, dur: [9, 11] },
+  drone:     { fov: 44, dur: [7, 9] },
+  trackside: { fov: 22, dur: [5.5, 6.5] },
+  low:       { fov: 60, dur: [6, 8] },
+  onboard:   { fov: 72, dur: [7, 9] },
+  heli:      { fov: 32, dur: [7, 9] },
+  front:     { fov: 40, dur: [5, 7] },
+};
+const cineEl = $("#cine"), cineFade = $("#cineFade"), cineCard = $("#cineCard");
+const rand = (a, b) => a + Math.random() * (b - a);
+
+function cineIndexAhead(i, meters) {
+  const P = cur.P;
+  let k = i, d = 0;
+  while (d < meters) { d += P.ds[k]; k = (k + 1) % P.n; }
+  return k;
+}
+
+function startShot(name) {
+  const [i] = sampleClock(cur.P, state.clock);
+  const def = SHOTS[name];
+  cine.shot = name;
+  cine.wide = null;
+  cine.t = 0;
+  cine.dur = rand(def.dur[0], def.dur[1]);
+  cine.a = Math.random() * Math.PI * 2;
+  cine.side = Math.random() < 0.5 ? -1 : 1;
+  cine.snap = true;
+  cine.recent = [name, ...cine.recent].slice(0, 3);
+  camera.fov = def.fov;
+  camera.updateProjectionMatrix();
+  followDir.copy(cur.tan[i]);
+  if (name === "trackside") {
+    // park a long-lens camera beside the track where the car will be in ~3 s
+    const v = cur.P.v[i];
+    const k = cineIndexAhead(i, Math.max(60, v * 3.2));
+    const p = cur.pts[k], nn = cur.nrm[k];
+    cine.anchor.set(p.x + nn.x * cine.side * (HALF_W + rand(14, 26)), p.y + rand(2.5, 6), p.z + nn.z * cine.side * (HALF_W + rand(14, 26)));
+  }
+}
+
+function nextShot() {
+  const pool = Object.keys(SHOTS).filter(s => s !== "wide" && !cine.recent.includes(s));
+  // the overview comes back now and then
+  const name = Math.random() < 0.14 && cine.recent[0] !== "wide" ? "wide" : pool[Math.floor(Math.random() * pool.length)];
+  startShot(name);
+}
+
+function cineCamera(dt, pos, fwd) {
+  cine.t += dt;
+  followDir.lerp(fwd, 1 - Math.exp(-dt * (cine.shot === "onboard" ? 10 : 2.5))).normalize();
+  const h = followDir;
+  const side = tmpV.set(-h.z, 0, h.x).normalize().multiplyScalar(cine.side);
+  let smooth = 0; // 0 = locked to target, otherwise lerp rate
+  let lookSmooth = 0;
+  const c = cine.cam, l = cine.look;
+  const k = cine.t / cine.dur;
+
+  switch (cine.shot) {
+    case "wide": {
+      const f = cine.wide || (cine.wide = framing("orbit"));
+      const ang = cine.a * 0.15 + cine.t * 0.05;
+      const off = f.pos.clone().sub(f.target).applyAxisAngle(UP, ang).multiplyScalar(1.02 - 0.1 * k);
+      c.copy(f.target).add(off);
+      l.copy(f.target);
+      break;
+    }
+    case "drone": {
+      const ang = cine.a + cine.t * 0.24, R = 34 - 6 * k;
+      c.set(pos.x + Math.cos(ang) * R, pos.y + 11 + Math.sin(cine.t * 0.4) * 3, pos.z + Math.sin(ang) * R);
+      l.copy(pos).addScaledVector(UP, 0.8);
+      break;
+    }
+    case "trackside":
+      c.copy(cine.anchor);
+      l.copy(pos).addScaledVector(UP, 0.7);
+      lookSmooth = 7;
+      break;
+    case "low":
+      c.copy(pos).addScaledVector(h, -7.5).addScaledVector(side, 2.4).addScaledVector(UP, 1.15);
+      l.copy(pos).addScaledVector(h, 22).addScaledVector(UP, 0.7);
+      break;
+    case "onboard":
+      c.copy(pos).addScaledVector(fwd, 0.5).addScaledVector(UP, 1.12);
+      l.copy(pos).addScaledVector(h, 40).addScaledVector(UP, 0.9);
+      break;
+    case "heli":
+      c.copy(pos).addScaledVector(h, -70).addScaledVector(side, 55).addScaledVector(UP, 95 - 25 * k);
+      l.copy(pos);
+      smooth = 1.6; lookSmooth = 5;
+      break;
+    case "front":
+      c.copy(pos).addScaledVector(h, 12 - 3 * k).addScaledVector(side, 1.6).addScaledVector(UP, 1.6);
+      l.copy(pos).addScaledVector(UP, 0.8);
+      break;
+  }
+
+  if (cine.snap || !smooth) camera.position.copy(c);
+  else camera.position.lerp(c, 1 - Math.exp(-dt * smooth));
+  if (cine.snap || !lookSmooth) lookAt.copy(l);
+  else lookAt.lerp(l, 1 - Math.exp(-dt * lookSmooth));
+  cine.snap = false;
+  camera.lookAt(lookAt);
+
+  // dip to black before every cut
+  if (!cine.fading && cine.t > cine.dur - 0.42) { cine.fading = true; cineFade.classList.add("is-black"); }
+  if (cine.t >= cine.dur) {
+    cine.fading = false;
+    if (cine.pendingNext) {
+      cine.pendingNext = false;
+      cineTrack(1);
+    } else nextShot();
+    cineFade.classList.remove("is-black");
+  }
+}
+
+function cineLap() {
+  // a full lap is done: finish the current shot quickly and move to the next circuit
+  cine.laps++;
+  cine.pendingNext = true;
+  cine.dur = Math.min(cine.dur, cine.t + 0.45);
+}
+
+function cineTrack(dir) {
+  step(dir);
+  cine.laps = 0;
+  cine.pendingNext = false;
+  cine.recent = [];
+  startShot("wide");
+  showCard();
+}
+
+function showCard() {
+  const T = cur.T, P = cur.P;
+  $("#cineKicker").innerHTML = "";
+  const b = document.createElement("b");
+  b.textContent = roundLabel(T);
+  $("#cineKicker").append(b, ` ${T.city} · ${country(T.cc)}`);
+  $("#cineTitle").textContent = T.name;
+  $("#cineMeta").textContent = `${(T.length / 1000).toFixed(3)} ${t("unit.km")} · Δ ${Math.round(P.ymax)} ${t("unit.m")} · ${t("fact.lap")} ${fmtLap(P.lap)}`;
+  cineCard.classList.remove("is-on");
+  void cineCard.offsetWidth;
+  clearTimeout(cine.cardTimer);
+  setTimeout(() => cineCard.classList.add("is-on"), 700);
+  cine.cardTimer = setTimeout(() => cineCard.classList.remove("is-on"), 6500);
+}
+
+function cineWake() {
+  if (!cine.on) return;
+  cineEl.classList.add("is-ui");
+  document.body.classList.remove("cine-idle");
+  clearTimeout(cine.uiTimer);
+  cine.uiTimer = setTimeout(() => { cineEl.classList.remove("is-ui"); document.body.classList.add("cine-idle"); }, 2200);
+}
+
+function enterCinema() {
+  if (cine.on || !cur || !renderer) return;
+  cine.on = true;
+  $("#panel").classList.remove("is-open");
+  document.body.classList.add("is-cinema", "cine-idle");
+  cineEl.setAttribute("aria-hidden", "false");
+  controls.enabled = false;
+  controls.autoRotate = false;
+  tween = null;
+  if (!state.playing) togglePlay();
+  const el = document.documentElement;
+  if (el.requestFullscreen && !document.fullscreenElement) {
+    el.requestFullscreen().then(() => { cine.fs = true; }).catch(() => { cine.fs = false; });
+  }
+  resize();
+  cine.laps = 0;
+  cine.pendingNext = false;
+  cine.recent = [];
+  startShot("wide");
+  showCard();
+  cineWake();
+}
+
+function exitCinema() {
+  if (!cine.on) return;
+  cine.on = false;
+  document.body.classList.remove("is-cinema", "cine-idle");
+  cineEl.setAttribute("aria-hidden", "true");
+  cineEl.classList.remove("is-ui");
+  cineFade.classList.remove("is-black");
+  cineCard.classList.remove("is-on");
+  clearTimeout(cine.cardTimer);
+  if (cine.fs && document.fullscreenElement) document.exitFullscreen().catch(() => {});
+  cine.fs = false;
+  resize();
+  controls.target.copy(lookAt);
+  setCam(state.cam);
+}
+
+document.addEventListener("fullscreenchange", () => {
+  // Esc in fullscreen is swallowed by the browser: leaving fullscreen means leaving cinema
+  if (!document.fullscreenElement && cine.on && cine.fs) { cine.fs = false; exitCinema(); }
+});
+addEventListener("pointermove", cineWake, { passive: true });
+addEventListener("pointerdown", cineWake, { passive: true });
+
 /* ---------- main loop ---------- */
 const clock = new THREE.Clock();
 const hud = { speed: $("#hSpeed"), gear: $("#hGear"), thr: $("#hThr"), brk: $("#hBrk"), lap: $("#hLap"), lapN: $("#hLapN"), elev: $("#hElev"), s: [$("#hS1"), $("#hS2"), $("#hS3")] };
-let hudTick = 0;
 
 function sampleClock(P, c) {
   let lo = 0, hi = P.n;
@@ -821,96 +1073,136 @@ function sampleClock(P, c) {
   return [lo, Math.min(1, Math.max(0, f))];
 }
 
-function frame() {
+/* trail: fixed-size line, rewritten in place every frame (no allocations) */
+let trailN = 0;
+function resetTrail(n) {
+  trailN = Math.max(12, Math.round(n * 0.06)) + 1; // points incl. the car itself
+  trail.geometry.dispose();
+  trail.geometry = new LineGeometry();
+  trail.geometry.setPositions(new Float32Array(trailN * 3));
+  trail.geometry.setColors(new Float32Array(trailN * 3));
+  trail.frustumCulled = false;
+}
+function updateTrail(i, f, n) {
+  const g = trail.geometry;
+  const pa = g.attributes.instanceStart.data, ca = g.attributes.instanceColorStart.data;
+  const P = pa.array, C = ca.array, last = trailN - 1;
+  const q0 = cur.pts[i], q1 = cur.pts[(i + 1) % n], ff = Math.max(f, 0.02);
+  for (let k = 0; k < trailN; k++) {
+    let x, y, z;
+    if (k === last) { x = q0.x + (q1.x - q0.x) * ff; y = q0.y + (q1.y - q0.y) * ff; z = q0.z + (q1.z - q0.z) * ff; }
+    else { const q = cur.pts[(i - (last - 1 - k) + n * 2) % n]; x = q.x; y = q.y; z = q.z; }
+    const kk = k / last;
+    // segment k-1 ends here, segment k starts here (interleaved start/end layout)
+    if (k > 0) { const o = (k - 1) * 6 + 3; P[o] = x; P[o + 1] = y + 0.3; P[o + 2] = z; C[o] = kk; C[o + 1] = 0.16 * kk + (k === last ? 0.14 : 0); C[o + 2] = 0.24 * kk + (k === last ? 0.11 : 0); }
+    if (k < last) { const o = k * 6; P[o] = x; P[o + 1] = y + 0.3; P[o + 2] = z; C[o] = kk; C[o + 1] = 0.16 * kk; C[o + 2] = 0.24 * kk; }
+  }
+  pa.needsUpdate = true;
+  ca.needsUpdate = true;
+}
+
+/* HUD: touch the DOM only when a value actually changes */
+const hudCache = new Map();
+function setText(el, v) { if (hudCache.get(el) !== v) { hudCache.set(el, v); el.textContent = v; } }
+function setHeight(el, v) { const s = v.toFixed(0) + "%"; if (hudCache.get(el) !== s) { hudCache.set(el, s); el.style.height = s; } }
+let lastSector = -1, lastProfX = -1;
+
+function frame(now) {
+  requestAnimationFrame(frame);
+  measure(now);
   const dt = Math.min(0.05, clock.getDelta());
-  if (cur && cur.pts) {
-    const P = cur.P, n = P.n;
-    if (state.playing) {
-      state.clock += dt * state.rate;
-      if (state.clock >= P.lap) { state.clock -= P.lap; state.lapN++; state.lastLap = P.lap; }
-    }
-    const [i, f] = sampleClock(P, state.clock);
-    const j = (i + 1) % n;
-    const pos = carPos.lerpVectors(cur.pts[i], cur.pts[j], f);
-    const fwd = tmpV2.lerpVectors(cur.tan[i], cur.tan[j], f).normalize();
-    car.position.copy(pos);
-    car.lookAt(pos.x + fwd.x, pos.y + fwd.y, pos.z + fwd.z);
+  if (!cur || !cur.pts) return;
+
+  // nothing moves: skip the frame entirely (damping still settles through controls.update)
+  const active = state.playing || tween || cine.on || followBlend < 1 || dirty || (controls.enabled && controls.autoRotate);
+  if (!active) { if (controls.enabled) controls.update(); if (!dirty) return; }
+  dirty = false;
+
+  const P = cur.P, n = P.n;
+  if (state.playing) {
+    state.clock += dt * state.rate;
+    if (state.clock >= P.lap) { state.clock -= P.lap; state.lapN++; state.lastLap = P.lap; if (cine.on) cineLap(); }
+  }
+  const [i, f] = sampleClock(P, state.clock);
+  const j = (i + 1) % n;
+  const pos = carPos.lerpVectors(cur.pts[i], cur.pts[j], f);
+  const fwd = tmpV2.lerpVectors(cur.tan[i], cur.tan[j], f).normalize();
+  car.position.copy(pos);
+  car.lookAt(pos.x + fwd.x, pos.y + fwd.y, pos.z + fwd.z);
+  const far = cine.on ? cine.shot === "wide" : state.cam === "orbit" || state.cam === "top";
+  carGlow.visible = far;
+  if (far) {
     carGlow.position.set(pos.x, pos.y + 1.5, pos.z);
-    const pulse = 0.045 + Math.sin(performance.now() / 180) * 0.008;
+    const pulse = 0.045 + Math.sin(now / 180) * 0.008;
     carGlow.scale.set(pulse, pulse, 1);
-    const far = state.cam === "orbit" || state.cam === "top";
-    carGlow.visible = far;
+  }
+  updateTrail(i, f, n);
 
-    // trail: last ~6% of the lap
-    const tl = Math.max(12, Math.round(n * 0.06)), tp = [], tcol = [];
-    for (let k = tl; k >= 0; k--) {
-      const q = cur.pts[(i - k + n) % n];
-      const kk = 1 - k / tl;
-      tp.push(q.x, q.y + 0.3, q.z);
-      tcol.push(1 * kk, 0.16 * kk, 0.24 * kk);
-    }
-    if (f > 0.02) { tp.push(pos.x, pos.y + 0.3, pos.z); tcol.push(1, 0.3, 0.35); }
-    trail.geometry.dispose();
-    trail.geometry = new LineGeometry();
-    trail.geometry.setPositions(tp);
-    trail.geometry.setColors(tcol);
-
-    // cameras
-    const follow = state.cam === "chase" || state.cam === "onboard";
-    if (follow) {
-      // smooth the heading, not the position, so the camera never lags behind at 300+ km/h
-      followDir.lerp(fwd, 1 - Math.exp(-dt * (state.cam === "onboard" ? 10 : 3.5))).normalize();
-      const h = followDir;
-      if (state.cam === "chase") {
-        desiredPos.set(pos.x - h.x * 13, pos.y + 4.6 - h.y * 13, pos.z - h.z * 13);
-        desiredLook.set(pos.x + h.x * 10, pos.y + 1.2 + h.y * 10, pos.z + h.z * 10);
-      } else {
-        desiredPos.set(pos.x + fwd.x * 0.5, pos.y + 1.12 + fwd.y * 0.5, pos.z + fwd.z * 0.5);
-        desiredLook.set(pos.x + h.x * 40, pos.y + 0.9 + h.y * 40, pos.z + h.z * 40);
-      }
-      // blend in from wherever the camera was when the mode switched
-      followBlend = Math.min(1, followBlend + dt / (reduceMotion ? 0.01 : 1.2));
-      const e = ease(followBlend);
-      camera.position.lerpVectors(followFrom, desiredPos, e);
-      lookAt.lerpVectors(followLookFrom, desiredLook, e);
-      camera.lookAt(lookAt);
-    } else if (tween) {
-      const kt = Math.min(1, (performance.now() - tween.start) / tween.dur), e = ease(kt);
-      camera.position.lerpVectors(tween.p0, tween.p1, e);
-      controls.target.lerpVectors(tween.t0, tween.t1, e);
-      camera.lookAt(controls.target);
-      if (kt >= 1) tween = null;
+  // cameras
+  const follow = cine.on ? cine.shot !== "wide" : state.cam === "chase" || state.cam === "onboard";
+  if (cine.on) {
+    cineCamera(dt, pos, fwd);
+  } else if (follow) {
+    // smooth the heading, not the position, so the camera never lags behind at 300+ km/h
+    followDir.lerp(fwd, 1 - Math.exp(-dt * (state.cam === "onboard" ? 10 : 3.5))).normalize();
+    const h = followDir;
+    if (state.cam === "chase") {
+      desiredPos.set(pos.x - h.x * 13, pos.y + 4.6 - h.y * 13, pos.z - h.z * 13);
+      desiredLook.set(pos.x + h.x * 10, pos.y + 1.2 + h.y * 10, pos.z + h.z * 10);
     } else {
-      controls.update();
+      desiredPos.set(pos.x + fwd.x * 0.5, pos.y + 1.12 + fwd.y * 0.5, pos.z + fwd.z * 0.5);
+      desiredLook.set(pos.x + h.x * 40, pos.y + 0.9 + h.y * 40, pos.z + h.z * 40);
     }
+    // blend in from wherever the camera was when the mode switched
+    followBlend = Math.min(1, followBlend + dt / (reduceMotion ? 0.01 : 1.2));
+    const e = ease(followBlend);
+    camera.position.lerpVectors(followFrom, desiredPos, e);
+    lookAt.lerpVectors(followLookFrom, desiredLook, e);
+    camera.lookAt(lookAt);
+  } else if (tween) {
+    const kt = Math.min(1, (now - tween.start) / tween.dur), e = ease(kt);
+    camera.position.lerpVectors(tween.p0, tween.p1, e);
+    controls.target.lerpVectors(tween.t0, tween.t1, e);
+    camera.lookAt(controls.target);
+    if (kt >= 1) tween = null;
+  } else if (active) {
+    controls.update();
+  }
 
-    if (cur.curtain) { const u = cur.curtain.uniforms.uO; u.value += ((follow ? 0.06 : 0.3) - u.value) * Math.min(1, dt * 4); }
+  if (cur.curtain) {
+    const u = cur.curtain.uniforms.uO, target = cine.on && follow ? 0 : follow ? 0.06 : 0.3;
+    if (Math.abs(target - u.value) > 0.002) { u.value += (target - u.value) * Math.min(1, dt * 4); dirty = true; }
+  }
 
-    // HUD (throttled to ~30 fps)
-    if (++hudTick % 2 === 0) {
-      const v = P.v[i] + (P.v[j] - P.v[i]) * f;
-      const k = kmh(v);
-      hud.speed.textContent = k;
-      hud.gear.textContent = gearOf(k);
-      const a = P.acc[i];
-      hud.thr.style.height = (a > -0.5 ? Math.min(100, 35 + (a / driveAcc(v)) * 65) : 0) + "%";
-      hud.brk.style.height = (a < -0.5 ? Math.min(100, (-a / brakeAcc(v)) * 100) : 0) + "%";
-      hud.lap.textContent = fmtLap(state.clock);
-      hud.lapN.textContent = state.lapN;
-      const sec = Math.min(2, Math.floor(((P.s[i] + P.ds[i] * f) / P.L) * 3));
+  // HUD (hidden in cinema mode, so skip it there)
+  if (!cine.on) {
+    const v = P.v[i] + (P.v[j] - P.v[i]) * f;
+    const k = kmh(v);
+    setText(hud.speed, k);
+    setText(hud.gear, gearOf(k));
+    const a = P.acc[i];
+    setHeight(hud.thr, a > -0.5 ? Math.min(100, 35 + (a / driveAcc(v)) * 65) : 0);
+    setHeight(hud.brk, a < -0.5 ? Math.min(100, (-a / brakeAcc(v)) * 100) : 0);
+    setText(hud.lap, fmtLap(state.clock));
+    setText(hud.lapN, state.lapN);
+    const sec = Math.min(2, Math.floor(((P.s[i] + P.ds[i] * f) / P.L) * 3));
+    if (sec !== lastSector) {
+      lastSector = sec;
       hud.s.forEach((el, q) => { el.classList.toggle("is-done", q < sec); el.classList.toggle("is-now", q === sec); });
-      hud.elev.textContent = `${Math.round(cur.T.base + P.y[i])} ${t("unit.m")}`;
-      drawProfile(i, f);
     }
+    setText(hud.elev, `${Math.round(cur.T.base + P.y[i])} ${t("unit.m")}`);
+    const px = Math.round(((P.s[i] + P.ds[i] * f) / P.L) * prof.clientWidth * 2);
+    if (px !== lastProfX) { lastProfX = px; drawProfile(i, f); }
 
-    // tags
     const W = canvas.clientWidth, H = canvas.clientHeight;
     for (const tg of tags) placeTag(tg.el, tg.pos, W, H);
     carTag.style.display = far ? "" : "none";
     if (far) placeTag(carTag, carTagPos.set(pos.x, pos.y + 2, pos.z), W, H);
   }
-  if (NOFX) renderer.render(scene, camera); else composer.render();
-  requestAnimationFrame(frame);
+
+  renderCount++;
+  if (bloom.enabled) composer.render();
+  else renderer.render(scene, camera);
 }
 
 function resize() {
@@ -919,7 +1211,10 @@ function resize() {
   if (!w || !h) return;
   renderer.setSize(w, h, false);
   composer.setSize(w, h);
-  bloom.setSize(w, h);
+  const pr = renderer.getPixelRatio(), bs = QUALITY[qLevel].bs || 0.5;
+  bloom.setSize(Math.round(w * pr * bs), Math.round(h * pr * bs));
+  dirty = true;
+  if (typeof cine !== "undefined") cine.wide = null;
   camera.aspect = w / h;
   for (const m of lineMats) m.resolution.set(w, h);
   computeViewOffset();
@@ -934,7 +1229,7 @@ function resize() {
 function bindUI() {
   $$(".lang button").forEach(b => b.addEventListener("click", () => {
     lang = b.dataset.lang; store.set("lang", lang);
-    applyLang(); renderList(); renderGrid();
+    applyLang(); renderList();
     if (cur) { updateInfo(cur.T, cur.P); if (renderer) buildTrack(); }
   }));
   $$("[data-filter]").forEach(b => b.addEventListener("click", () => setFilter(b.dataset.filter)));
@@ -945,17 +1240,13 @@ function bindUI() {
     selectTrack(r.dataset.id);
     $("#panel").classList.remove("is-open");
   });
-  $("#grid").addEventListener("click", e => {
-    const c = e.target.closest(".card");
-    if (!c) return;
-    selectTrack(c.dataset.id);
-    viewer.scrollIntoView({ behavior: reduceMotion ? "auto" : "smooth" });
-  });
   $("#prevTrack").addEventListener("click", () => step(-1));
   $("#nextTrack").addEventListener("click", () => step(1));
   $("#openList").addEventListener("click", () => $("#panel").classList.add("is-open"));
   $("#closeList").addEventListener("click", () => $("#panel").classList.remove("is-open"));
   $("#play").addEventListener("click", togglePlay);
+  $("#cineBtn").addEventListener("click", enterCinema);
+  $("#cineExit").addEventListener("click", exitCinema);
   $$("#camSeg button").forEach(b => b.addEventListener("click", () => setCam(b.dataset.cam)));
   $$("#colorSeg button").forEach(b => b.addEventListener("click", () => {
     state.color = b.dataset.color;
@@ -979,20 +1270,21 @@ function bindUI() {
   });
   addEventListener("keydown", e => {
     if (e.target.closest("input, textarea")) return;
-    if (e.key === "ArrowRight") step(1);
+    if (cine.on && (e.key === "ArrowRight" || e.key === "ArrowLeft")) cineTrack(e.key === "ArrowRight" ? 1 : -1);
+    else if (e.key === "ArrowRight") step(1);
     else if (e.key === "ArrowLeft") step(-1);
     else if (e.key === " " && e.target === document.body) { e.preventDefault(); togglePlay(); }
-    else if (["1", "2", "3", "4"].includes(e.key)) setCam(["orbit", "top", "chase", "onboard"][+e.key - 1]);
-    else if (e.key === "Escape") $("#panel").classList.remove("is-open");
+    else if (!cine.on && ["1", "2", "3", "4"].includes(e.key)) setCam(["orbit", "top", "chase", "onboard"][+e.key - 1]);
+    else if (e.key === "Escape") { if (cine.on) exitCinema(); else $("#panel").classList.remove("is-open"); }
+    else if (e.code === "KeyC" && !e.ctrlKey && !e.metaKey && !e.altKey) { if (cine.on) exitCinema(); else enterCinema(); }
   });
-  const nav = $("#nav");
-  const onScroll = () => nav.classList.toggle("is-scrolled", scrollY > 10);
-  addEventListener("scroll", onScroll, { passive: true });
-  onScroll();
 }
 function togglePlay() {
   state.playing = !state.playing;
   $("#play").classList.toggle("is-on", state.playing);
+  // pause freezes the whole scene, so the GPU can idle
+  if (controls) controls.autoRotate = state.playing && state.cam === "orbit" && !reduceMotion && !cine.on;
+  dirty = true;
 }
 
 /* ---------- loader: five red lights, then lights out ---------- */
@@ -1017,7 +1309,6 @@ function runLoader() {
 applyLang();
 bindUI();
 setFilter(state.filter);
-renderMarquee();
 runLoader();
 
 const initial = new URL(location.href).searchParams.get("track") || store.get("track", TRACKS[0] && TRACKS[0].id);
