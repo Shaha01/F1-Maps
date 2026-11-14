@@ -1,0 +1,200 @@
+<!doctype html>
+<html lang="ru">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+  <title>F1 Maps — 3D трассы Формулы-1</title>
+  <meta name="description" content="Интерактивная 3D-визуализация трасс Формулы-1: реальная геометрия, перепады высот, симуляция круга и телеметрия.">
+  <meta name="theme-color" content="#050506">
+  <meta property="og:title" content="F1 Maps — 3D circuits">
+  <meta property="og:description" content="Interactive 3D Formula 1 circuits with real elevation and a simulated lap.">
+  <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 64 64'%3E%3Crect width='64' height='64' rx='14' fill='%23050506'/%3E%3Ctext x='32' y='38' font-family='Arial Black,Arial' font-weight='900' font-size='21' text-anchor='middle' fill='%23ffffff' transform='skewX(-8) translate(5 0)'%3ESHA%3C/text%3E%3Crect x='14' y='45' width='12' height='5' rx='1' fill='%23ff2a3d'/%3E%3Crect x='27' y='45' width='12' height='5' rx='1' fill='%23ffd400'/%3E%3Crect x='40' y='45' width='12' height='5' rx='1' fill='%232b4cff'/%3E%3C/svg%3E">
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Unbounded:wght@400;600;800;900&family=Manrope:wght@400;500;600;700&family=JetBrains+Mono:wght@400;600&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="assets/css/style.css">
+  <script type="importmap">
+  {
+    "imports": {
+      "three": "https://unpkg.com/three@0.169.0/build/three.module.js",
+      "three/addons/": "https://unpkg.com/three@0.169.0/examples/jsm/"
+    }
+  }
+  </script>
+</head>
+<body class="is-loading">
+
+  <!-- ============ LOADER: F1 START LIGHTS ============ -->
+  <div class="loader" id="loader" aria-hidden="true">
+    <div class="loader__lights">
+      <div class="light"><i></i><i></i></div>
+      <div class="light"><i></i><i></i></div>
+      <div class="light"><i></i><i></i></div>
+      <div class="light"><i></i><i></i></div>
+      <div class="light"><i></i><i></i></div>
+    </div>
+    <p class="loader__text" id="loaderText">LIGHTS OUT <span>AND AWAY WE GO</span></p>
+    <p class="loader__skip" data-i18n="loader.skip">Нажми, чтобы пропустить</p>
+  </div>
+
+  <div class="grain" aria-hidden="true"></div>
+
+  <!-- ============ NAV ============ -->
+  <header class="nav" id="nav">
+    <a href="#viewer" class="nav__logo" aria-label="F1 Maps">
+      <span class="logo"><span class="logo__text">SHA</span><span class="logo__stripes" aria-hidden="true"><i></i><i></i><i></i></span></span>
+      <span class="nav__title">F1&nbsp;MAPS</span>
+      <span class="nav__live"><i></i>3D</span>
+    </a>
+    <nav class="nav__links">
+      <a href="#viewer" data-i18n="nav.viewer">Трасса</a>
+      <a href="#circuits" data-i18n="nav.circuits">Все трассы</a>
+    </nav>
+    <div class="nav__right">
+      <div class="lang" role="group" aria-label="Language">
+        <button data-lang="ru" type="button">RU</button>
+        <button data-lang="en" type="button">EN</button>
+        <button data-lang="uz" type="button">UZ</button>
+        <span class="lang__pill"></span>
+      </div>
+    </div>
+  </header>
+
+  <main>
+    <!-- ============ VIEWER ============ -->
+    <section class="viewer" id="viewer">
+      <canvas class="viewer__scene" id="scene" aria-label="3D circuit"></canvas>
+      <div class="viewer__shade" aria-hidden="true"></div>
+      <div class="viewer__status mono" id="sceneStatus" data-i18n="viewer.loading">Загрузка 3D…</div>
+
+      <div class="viewer__ui">
+        <!-- track info -->
+        <div class="info" id="info">
+          <p class="info__kicker mono"><span class="chip" id="tRound">R01</span><span id="tPlace">—</span></p>
+          <h1 class="info__title" id="tTitle">—</h1>
+          <div class="info__nav">
+            <button class="iconbtn" id="prevTrack" type="button" aria-label="Previous circuit"><svg viewBox="0 0 24 24"><path d="M15 5l-7 7 7 7"/></svg></button>
+            <button class="iconbtn" id="nextTrack" type="button" aria-label="Next circuit"><svg viewBox="0 0 24 24"><path d="M9 5l7 7-7 7"/></svg></button>
+            <button class="pillbtn mono" id="openList" type="button"><span data-i18n="panel.open">Все трассы</span> <b id="tCount">0</b></button>
+          </div>
+          <dl class="facts" id="facts">
+            <div class="fact"><dt data-i18n="fact.length">Длина</dt><dd id="fLength">—</dd></div>
+            <div class="fact"><dt data-i18n="fact.delta">Перепад высот</dt><dd id="fDelta">—</dd></div>
+            <div class="fact"><dt data-i18n="fact.alt">Над уровнем моря</dt><dd id="fAlt">—</dd></div>
+            <div class="fact"><dt data-i18n="fact.firstgp">Первый Гран-при</dt><dd id="fFirst">—</dd></div>
+            <div class="fact"><dt data-i18n="fact.lap">Круг (симуляция)</dt><dd id="fLap">—</dd></div>
+            <div class="fact"><dt data-i18n="fact.vmax">V max (симуляция)</dt><dd id="fVmax">—</dd></div>
+          </dl>
+        </div>
+
+        <!-- circuit list panel -->
+        <aside class="panel" id="panel" aria-label="Circuits">
+          <div class="panel__head">
+            <div class="tabs" role="tablist">
+              <button type="button" class="tab is-active" data-filter="season" data-i18n="tab.season">Сезон 2026</button>
+              <button type="button" class="tab" data-filter="all" data-i18n="tab.all">Все</button>
+            </div>
+            <button class="iconbtn panel__close" id="closeList" type="button" aria-label="Close"><svg viewBox="0 0 24 24"><path d="M6 6l12 12M18 6L6 18"/></svg></button>
+          </div>
+          <label class="search">
+            <svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="11" cy="11" r="6.5"/><path d="M16 16l4.5 4.5"/></svg>
+            <input type="search" id="search" autocomplete="off" data-i18n-ph="panel.search" placeholder="Поиск трассы или города">
+          </label>
+          <ul class="list" id="list"></ul>
+        </aside>
+
+        <!-- HUD -->
+        <div class="hud" id="hud">
+          <div class="hud__row">
+            <div class="cell cell--speed">
+              <span class="cell__label mono" data-i18n="hud.speed">Скорость</span>
+              <div class="speed"><b id="hSpeed">0</b><small>KM/H</small></div>
+            </div>
+            <div class="cell cell--gear">
+              <span class="cell__label mono" data-i18n="hud.gear">Пер.</span>
+              <b class="gear" id="hGear">N</b>
+            </div>
+            <div class="cell cell--pedals">
+              <span class="cell__label mono">THR / BRK</span>
+              <div class="pedals">
+                <div class="pedal pedal--thr"><i id="hThr"></i></div>
+                <div class="pedal pedal--brk"><i id="hBrk"></i></div>
+              </div>
+            </div>
+            <div class="cell cell--lap">
+              <span class="cell__label mono"><span data-i18n="hud.lap">Круг</span> <b id="hLapN">1</b></span>
+              <b class="laptime" id="hLap">0:00.000</b>
+              <span class="sectors"><i id="hS1">S1</i><i id="hS2">S2</i><i id="hS3">S3</i></span>
+            </div>
+            <div class="cell cell--profile">
+              <span class="cell__label mono"><span data-i18n="hud.profile">Профиль высот</span> · <b id="hElev">0 м</b></span>
+              <canvas id="profile" aria-label="Elevation profile"></canvas>
+            </div>
+          </div>
+          <div class="hud__controls">
+            <button class="ctrl ctrl--play is-on" id="play" type="button" aria-label="Play / pause">
+              <svg class="i-pause" viewBox="0 0 24 24"><path d="M8 5v14M16 5v14"/></svg>
+              <svg class="i-play" viewBox="0 0 24 24"><path d="M7 4.5v15l12-7.5z"/></svg>
+            </button>
+            <div class="seg" id="camSeg" role="group" aria-label="Camera">
+              <button type="button" data-cam="orbit" class="is-active" data-i18n="cam.orbit">Орбита</button>
+              <button type="button" data-cam="top" data-i18n="cam.top">Сверху</button>
+              <button type="button" data-cam="chase" data-i18n="cam.chase">Погоня</button>
+              <button type="button" data-cam="onboard" data-i18n="cam.onboard">Онборд</button>
+            </div>
+            <div class="seg" id="colorSeg" role="group" aria-label="Color">
+              <button type="button" data-color="sector" class="is-active" data-i18n="color.sector">Сектора</button>
+              <button type="button" data-color="speed" data-i18n="color.speed">Скорость</button>
+              <button type="button" data-color="elev" data-i18n="color.elev">Высота</button>
+            </div>
+            <div class="seg" id="rateSeg" role="group" aria-label="Playback rate">
+              <button type="button" data-rate="1" class="is-active">1×</button>
+              <button type="button" data-rate="2">2×</button>
+              <button type="button" data-rate="4">4×</button>
+            </div>
+            <label class="range mono">
+              <span data-i18n="ctrl.exag">Рельеф</span>
+              <input type="range" id="exag" min="1" max="8" step="0.5" value="3">
+              <b id="exagVal">×3</b>
+            </label>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <!-- ============ MARQUEE ============ -->
+    <div class="marquee" aria-hidden="true"><div class="marquee__track" id="marquee"></div></div>
+
+    <!-- ============ ALL CIRCUITS ============ -->
+    <section class="section" id="circuits">
+      <div class="wrap">
+        <div class="sector mono"><span>S2</span><i></i><b data-i18n="grid.sector">Трассы чемпионата</b></div>
+        <div class="section__head">
+          <h2 class="h2" data-i18n-html="grid.title">Каждый поворот —<br><em>в 3D.</em></h2>
+          <div class="tabs tabs--big" role="tablist">
+            <button type="button" class="tab is-active" data-filter="season" data-i18n="tab.season">Сезон 2026</button>
+            <button type="button" class="tab" data-filter="all" data-i18n="tab.all">Все</button>
+          </div>
+        </div>
+        <div class="grid" id="grid"></div>
+        <p class="note mono" data-i18n-html="grid.note">Геометрия — <a href="https://github.com/bacinger/f1-circuits" target="_blank" rel="noopener">bacinger/f1-circuits</a> (MIT). Высоты — <a href="https://open-meteo.com/en/docs/elevation-api" target="_blank" rel="noopener">Open-Meteo</a> / Copernicus DEM и <a href="https://www.opentopodata.org" target="_blank" rel="noopener">OpenTopoData</a> / SRTM, 90 м. Скорость, передачи и время круга — упрощённая физическая симуляция, не реальная телеметрия.</p>
+      </div>
+    </section>
+  </main>
+
+  <footer class="footer wrap">
+    <a class="credit" href="https://shaha01.github.io/Shakhriyor/" target="_blank" rel="noopener">
+      <span class="credit__label" data-i18n="footer.credit">Дизайн и разработка</span>
+      <span class="credit__name">Abrorov Shahriyor</span>
+      <span class="credit__stripes" aria-hidden="true"><i></i><i></i><i></i></span>
+    </a>
+    <span>© <span id="year">2026</span> SHA · F1 MAPS</span>
+  </footer>
+  <script>document.getElementById('year').textContent = new Date().getFullYear();</script>
+
+  <script src="data/tracks.js"></script>
+  <script src="assets/js/i18n.js"></script>
+  <script type="module" src="assets/js/app.js"></script>
+  <script>setTimeout(function () { if (window.__f1) return; document.body.classList.remove("is-loading"); var l = document.getElementById("loader"); if (l) l.classList.add("is-done"); var s = document.getElementById("sceneStatus"); if (s) s.textContent = "WebGL / Three.js — error"; }, 8000);</script>
+</body>
+</html>
